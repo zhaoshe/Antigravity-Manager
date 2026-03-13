@@ -343,6 +343,27 @@ pub fn wrap_request(
     );
 
     // Clean tool declarations (remove forbidden Schema fields like multipleOf, and remove redundant search decls)
+    // [FIX #3] 在过滤之前，先检测是否有「非联网」自定义函数——过滤后这些信息就丢失了。
+    // 如果有，则后续禁止注入 googleSearch（Gemini API 不允许两者混用）。
+    let has_non_search_functions = inner_request
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map_or(false, |arr| {
+            arr.iter().any(|tool| {
+                if let Some(decls) = tool.get("functionDeclarations").and_then(|v| v.as_array()) {
+                    decls.iter().any(|decl| {
+                        match decl.get("name").and_then(|v| v.as_str()) {
+                            Some(n) if n == "web_search" || n == "google_search" => false,
+                            Some(_) => true,  // 有真正的自定义函数
+                            None => false,
+                        }
+                    })
+                } else {
+                    false
+                }
+            })
+        });
+
     if let Some(tools) = inner_request.get_mut("tools") {
         if let Some(tools_arr) = tools.as_array_mut() {
             for tool in tools_arr {
@@ -394,8 +415,15 @@ pub fn wrap_request(
     );
 
     // Inject googleSearch tool if needed
-    if config.inject_google_search {
+    // [FIX #3] 使用过滤前检测的 has_non_search_functions，避免过滤后丢失判断依据。
+    // 只要原始请求中有自定义非联网函数，就禁止注入 googleSearch（Gemini API 不允许两者混用）。
+    if config.inject_google_search && !has_non_search_functions {
         crate::proxy::mappers::common_utils::inject_google_search_tool(&mut inner_request, Some(&config.final_model));
+    } else if config.inject_google_search && has_non_search_functions {
+        tracing::debug!(
+            "[Gemini-Wrapper] Skipping googleSearch injection: custom non-search functions present (model={})",
+            config.final_model
+        );
     }
 
     // Inject imageConfig if present (for image generation models)
@@ -1021,5 +1049,57 @@ mod tests {
         
         assert!(has_functions, "Should contain functionDeclarations");
         assert!(has_google_search, "Should contain googleSearch (Gemini 2.0+ supports mixed tools)");
+    }
+
+    #[test]
+    fn test_fix3_no_google_search_when_custom_functions_present() {
+        // 模拟 opencode 发来的请求：tools 里同时有 web_search（联网） + 自定义函数
+        // 场景：gemini-3-flash，客户端传了自定义 MCP 工具
+        let body = json!({
+            "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+            "tools": [{
+                "functionDeclarations": [
+                    // 联网工具（会被过滤掉）
+                    {"name": "web_search", "description": "search"},
+                    // 自定义非联网工具
+                    {"name": "read_file", "description": "reads a file", "parameters": {"type": "OBJECT", "properties": {"path": {"type": "STRING"}}}}
+                ]
+            }]
+        });
+
+        // 直接调用 wrap_request，用 -online 后缀触发 inject_google_search=true
+        let result = wrap_request(&body, "proj", "gemini-3-flash-online", None, None, None);
+        let req = result.get("request").unwrap();
+        let tools = req.get("tools").and_then(|t| t.as_array()).expect("tools must exist");
+
+        let has_google_search = tools.iter().any(|t| t.get("googleSearch").is_some());
+        let has_custom_fn = tools.iter().any(|t| {
+            t.get("functionDeclarations")
+                .and_then(|d| d.as_array())
+                .map_or(false, |arr| arr.iter().any(|f| f.get("name").and_then(|n| n.as_str()) == Some("read_file")))
+        });
+
+        assert!(!has_google_search, "[FIX3] googleSearch MUST NOT be injected when custom functions exist, but it was!");
+        assert!(has_custom_fn, "read_file function must still be present after filtering");
+    }
+
+    #[test]
+    fn test_fix3_google_search_only_request() {
+        // 场景：只有 web_search，没有自定义函数 → 应该注入 googleSearch
+        let body = json!({
+            "contents": [{"role": "user", "parts": [{"text": "search something"}]}],
+            "tools": [{
+                "functionDeclarations": [
+                    {"name": "web_search", "description": "search"}
+                ]
+            }]
+        });
+
+        let result = wrap_request(&body, "proj", "gemini-3-flash-online", None, None, None);
+        let req = result.get("request").unwrap();
+        let tools = req.get("tools").and_then(|t| t.as_array()).expect("tools must exist");
+
+        let has_google_search = tools.iter().any(|t| t.get("googleSearch").is_some());
+        assert!(has_google_search, "[FIX3] googleSearch SHOULD be injected when only web_search is in tools");
     }
 }

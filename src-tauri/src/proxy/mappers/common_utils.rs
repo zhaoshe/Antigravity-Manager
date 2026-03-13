@@ -355,12 +355,39 @@ pub fn inject_google_search_tool(body: &mut Value, mapped_model: Option<&str>) {
                     .map_or(false, |o| o.contains_key("functionDeclarations"))
             });
 
-            if has_functions && !supports_mixed_tools {
-                tracing::debug!(
-                    "Skipping googleSearch injection due to existing functionDeclarations on older model"
-                );
-                return;
-            }
+            // [FIX #4] 检查是否有「真正的」自定义非联网函数（非空 functionDeclarations）。
+            // - 只有 web_search：过滤后 decls 为空 → 允许注入 googleSearch（联网搜索替代）
+            // - 有自定义函数：decls 非空 → 禁止注入（API 不允许两者共存）
+            let has_real_functions = tools_arr.iter().any(|t| {
+                if let Some(decls) = t.as_object()
+                    .and_then(|o| o.get("functionDeclarations"))
+                    .and_then(|v| v.as_array())
+                {
+                    decls.iter().any(|decl| {
+                        match decl.get("name").and_then(|v| v.as_str()) {
+                            Some(n) if n == "web_search" || n == "google_search"
+                                || n == "web_search_20250305" || n == "builtin_web_search" => false,
+                            Some(_) => true,
+                            None => false,
+                        }
+                    })
+                } else {
+                    false
+                }
+            });
+        
+    tracing::debug!(
+        "[inject_google_search_tool] has_real_functions={}, model={:?}",
+        has_real_functions, mapped_model
+    );
+    
+    if has_real_functions {
+        tracing::debug!(
+            "[inject_google_search_tool] Skipping: non-search functionDeclarations present (model={:?})",
+            mapped_model
+        );
+        return;
+    }
 
             // 首先清理掉已存在的 googleSearch 或 googleSearchRetrieval，以防重复产生冲突
             tools_arr.retain(|t| {

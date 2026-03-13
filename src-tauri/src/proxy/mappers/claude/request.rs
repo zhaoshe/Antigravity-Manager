@@ -1717,40 +1717,24 @@ fn build_tools(
         }
 
         let mut tool_list = Vec::new();
-
         // [优化] Gemini 2.0+ 及 3.0 系列模型通常支持混合工具调用 (Function Calling + Google Search)
-        // 只有针对老旧模型或特定受限环境才需要互斥。
-        let model_lower = mapped_model.to_lowercase();
-        let supports_mixed_tools = model_lower.contains("gemini-2.0")
-            || model_lower.contains("gemini-2.5")
-            || model_lower.contains("gemini-3");
-
+        // [CRITICAL FIX] 但实际上 Google API 不允许混合！无论模型是什么，都不应该同时注入 googleSearch 和自定义函数
+        // let supports_mixed_tools = model_lower.contains("gemini-2.0")
+        //     || model_lower.contains("gemini-2.5")
+        //     || model_lower.contains("gemini-3");
+        
+        // [FIX5] 无论模型是什么，只要存在自定义函数，就禁止注入 googleSearch
+        // Google API 明确报错: "Built-in tools ({google_search}) and Function Calling cannot be combined"
         if !function_declarations.is_empty() {
-            let mut func_obj = serde_json::Map::new();
-            func_obj.insert(
-                "functionDeclarations".to_string(),
-                json!(function_declarations),
-            );
-            tool_list.push(json!(func_obj));
-
+            // 有自定义函数 - 跳过 googleSearch 注入
             if has_google_search {
-                if supports_mixed_tools {
-                    tracing::info!(
-                        "[Claude-Request] Enabling MIXED tool calling for {}: Function Calling + Google Search.",
-                        mapped_model
-                    );
-                    let mut search_obj = serde_json::Map::new();
-                    search_obj.insert("googleSearch".to_string(), json!({}));
-                    tool_list.push(json!(search_obj));
-                } else {
-                    tracing::info!(
-                        "[Claude-Request] Skipping googleSearch injection for {} due to existing function declarations. \
-                         Older Gemini models may not support mixed tool types.",
-                        mapped_model
-                    );
-                }
+                tracing::info!(
+                    "[Claude-Request] Skipping googleSearch injection for {}: custom functionDeclarations present (Google API does not support mixed tools).",
+                    mapped_model
+                );
             }
         } else if has_google_search {
+            // 没有自定义函数，只有联网工具 - 可以注入 googleSearch
             let mut search_obj = serde_json::Map::new();
             search_obj.insert("googleSearch".to_string(), json!({}));
             tool_list.push(json!(search_obj));

@@ -704,8 +704,31 @@ pub fn transform_openai_request(
         "parts": parts
     });
 
-    if config.inject_google_search {
+    // [FIX] 若请求中已有用户自定义 functionDeclarations，禁止同时注入 googleSearch。
+    // Gemini API 不允许 Built-in tools (googleSearch) 与 Function Calling 混合在同一请求中。
+    // auth 插件侧通过完全跳过注入规避了该问题，这里对齐相同策略。
+    let has_function_declarations = inner_request
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map_or(false, |arr| {
+            arr.iter().any(|t| {
+                t.as_object().map_or(false, |o| o.contains_key("functionDeclarations"))
+            })
+        });
+    
+    // [FIX5] 添加详细调试日志，追踪实际判断逻辑
+    tracing::debug!(
+        "[OpenAI-Request] googleSearch injection check: inject_google_search={}, has_function_declarations={}, model={}",
+        config.inject_google_search, has_function_declarations, mapped_model
+    );
+    
+    if config.inject_google_search && !has_function_declarations {
         crate::proxy::mappers::common_utils::inject_google_search_tool(&mut inner_request, Some(mapped_model));
+    } else if config.inject_google_search && has_function_declarations {
+        tracing::debug!(
+            "[OpenAI-Request] Skipping googleSearch injection: functionDeclarations already present (model={})",
+            mapped_model
+        );
     }
 
     if let Some(image_config) = config.image_config {
@@ -1197,5 +1220,69 @@ mod tests {
         
         assert!(has_functions, "Should contain functionDeclarations");
         assert!(has_google_search, "Should contain googleSearch (Gemini 2.0+ supports mixed tools)");
+    }
+
+    #[test]
+    fn test_fix_no_google_search_when_custom_functions_openai_path() {
+        // 真实场景: opencode 用 gemini-3-flash，带 MCP 自定义工具 + 联网工具
+        // 期望: googleSearch 不应被注入（Gemini API 报 400）
+        let req = OpenAIRequest {
+            model: "gemini-3-flash".to_string(),
+            messages: vec![OpenAIMessage {
+                role: "user".to_string(),
+                content: Some(OpenAIContent::String("帮我搜索并读取文件".to_string())),
+                reasoning_content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            tools: Some(vec![
+                // 联网工具 (应被过滤)
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "description": "search the web"
+                    }
+                }),
+                // 自定义 MCP 工具 (应保留)
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "description": "read a file",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"}
+                            }
+                        }
+                    }
+                }),
+            ]),
+            ..Default::default()
+        };
+
+        // gemini-3-flash 走这条路径
+        let (result, _, _) = transform_openai_request(&req, "proj", "gemini-3-flash", None);
+        let req_body = &result["request"];
+
+        // 打印出来方便调试
+        println!("[DEBUG] tools = {}", serde_json::to_string_pretty(&req_body["tools"]).unwrap_or_default());
+
+        let tools_opt = req_body.get("tools").and_then(|t| t.as_array());
+        let has_google_search = tools_opt.map_or(false, |arr| arr.iter().any(|t| t.get("googleSearch").is_some()));
+        let has_custom_fn = tools_opt.map_or(false, |arr| {
+            arr.iter().any(|t| {
+                t.get("functionDeclarations")
+                    .and_then(|d| d.as_array())
+                    .map_or(false, |decls| decls.iter().any(|f| f["name"] == "read_file"))
+            })
+        });
+
+        assert!(!has_google_search,
+            "[BUG] googleSearch was injected alongside custom functions! tools = {}",
+            serde_json::to_string(&req_body["tools"]).unwrap_or_default());
+        assert!(has_custom_fn, "read_file should still be present");
     }
 }

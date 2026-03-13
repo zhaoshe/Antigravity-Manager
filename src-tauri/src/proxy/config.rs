@@ -381,7 +381,7 @@ pub struct DebugLoggingConfig {
 impl Default for DebugLoggingConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,  // 默认开启，方便调试
             output_dir: None,
         }
     }
