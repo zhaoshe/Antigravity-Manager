@@ -9,6 +9,9 @@ jobs:
   build-tauri:
     permissions:
       contents: write
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ""
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
     strategy:
       fail-fast: false
       matrix:
@@ -252,7 +255,7 @@ jobs:
 
   docker-build-amd64:
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request' && (github.repository == 'lbjlaq/Antigravity-Manager' || vars.ENABLE_DOCKER_PUSH == 'true')
+    if: github.event_name != 'pull_request'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -281,7 +284,7 @@ jobs:
 
   docker-build-arm64:
     runs-on: ubuntu-24.04-arm
-    if: github.event_name != 'pull_request' && (github.repository == 'lbjlaq/Antigravity-Manager' || vars.ENABLE_DOCKER_PUSH == 'true')
+    if: github.event_name != 'pull_request'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -311,7 +314,7 @@ jobs:
   docker-manifest:
     needs: [docker-build-amd64, docker-build-arm64]
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request' && (github.repository == 'lbjlaq/Antigravity-Manager' || vars.ENABLE_DOCKER_PUSH == 'true')
+    if: github.event_name != 'pull_request'
     steps:
       - name: Login to Docker Hub
         uses: docker/login-action@v3
